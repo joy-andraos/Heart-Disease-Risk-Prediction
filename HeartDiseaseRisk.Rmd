@@ -1,6 +1,6 @@
 ---
-title: "Heart Disease Dataset"
-author: "Joy Andraos and Michel Al Kodsi"
+title: "Heart Disease Rsk Prediction"
+author: "Joy Andraos"
 date: "2024-12-07"
 output: pdf_document
 ---

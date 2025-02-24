@@ -1,0 +1,443 @@
+---
+title: "Heart Disease Dataset"
+author: "Joy Andraos and Michel Al Kodsi"
+date: "2024-12-07"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+```
+
+## Dataset description including context and features
+
+Here is the link to our dataset from Kaggle with 0 previous work:
+
+<https://www.kaggle.com/datasets/amiramohammedi07/heart-disease-prediction>
+
+
+**Context:**
+
+The Heart Disease dataset provides critical information about patients making it useful to predict the likelihood of heart disease, identify risk factors, and gain insights into cardiovascular health trends. It includes the following features:
+
+**Quantitative Features:**
+
+- Age: Age of the patient in years.
+- RestingBP: Resting blood pressure in mm Hg.
+- Cholesterol: Serum cholesterol level in mg/dL.
+- MaxHR: Maximum heart rate achieved during exercise.
+- Oldpeak: Depression of the ST segment in comparison to rest (numeric value).
+
+**Qualitative Features:**
+
+- Sex: Gender of the patient, categorized as Male (M) or Female (F).
+- ChestPainType: Type of chest pain experienced such as ATA (Atypical Angina), NAP (Non-Anginal Pain), TA (Typical Angina) and ASY (Asymptomatic).
+- FastingBS: Binary indicator for fasting blood sugar > 120 mg/dL (1 = Yes, 0 = No).
+- RestingECG: Results of the resting electrocardiogram (Normal, ST-T, LVH).
+- ExerciseAngina: Whether the patient experiences angina induced by exercise (Y/N).
+- ST_Slope: Slope of the peak exercise ST segment (Up, Down, Flat).
+- HeartDisease: Binary target variable indicating presence (1) or absence (0) of heart disease.
+
+```{r}
+library(tidyverse) 
+library(caret) 
+library(dplyr)
+library(corrplot)
+library(reshape2)
+library(MASS) 
+library(readr)
+library(rpart)       
+library(rpart.plot)  
+library(randomForest)
+library(gbm)
+library(ggplot2)
+library(factoextra)
+library(cluster)
+```
+
+```{r}
+df <- read_csv("heart-disease.csv")
+View(df)
+```
+## Part 1: Supervised learning using tree-based approaches
+
+
+First, we check for missing values in each column:
+
+```{r}
+colSums(is.na(df))
+```
+Second, we convert categorical factors to into numeric values and compute the correlation matrix:
+
+```{r}
+df$Sex <- as.factor(df$Sex)
+df$ChestPainType <- as.factor(df$ChestPainType)
+df$RestingECG <- as.factor(df$RestingECG)
+df$ExerciseAngina <- as.factor(df$ExerciseAngina)
+df$ST_Slope <- as.factor(df$ST_Slope)
+
+numeric_data <- df %>%
+  mutate(
+    Sex = as.numeric(Sex),
+    ChestPainType = as.numeric(ChestPainType),
+    RestingECG = as.numeric(RestingECG),
+    ExerciseAngina = as.numeric(ExerciseAngina),
+    ST_Slope = as.numeric(ST_Slope)
+  )
+
+cor_matrix <- cor(numeric_data)
+melted_cor <- melt(cor_matrix)
+
+ggplot(data = melted_cor, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Correlation Matrix Heatmap", x = "Attributes", y = "Attributes") +
+  geom_text(aes(label = round(value, 2)), color = "black", size = 2.5)
+```
+The relations between ExerciseAngina and HeartDisease, ST_Slope and HeartDisease, and ST_Slope and Oldpeak seem worth investigating.
+
+**EDA**
+
+```{r}
+ggplot(df, aes(x = factor(HeartDisease), fill = Sex)) +
+  geom_bar(stat = "count") +
+  labs(title = "Gender Distribution by HeartDisease", x = "Heart Disease", y = "Count") +
+  scale_fill_manual(values = c("tomato", "lightblue"))  
+```
+We can notice that the majority of our dataset consists of males. Therefore, the uneven distribution might not lead to accurate results and gender won't be considered as an indicator of heart disease.
+
+```{r}
+ggplot(df, aes(x = factor(HeartDisease), y = Age)) +
+  geom_boxplot(fill = "tomato") +
+  labs(title = "Age Distribution by HeartDisease", x = "Heart Disease", y = "Age")
+```
+Age alone does not affect the likelyhood of getting heart disease. Hoowever, combined with other factors, it could be an indicator as we notice that most people affected range between 51 and 63 years old. 
+
+```{r}
+ggplot(df, aes(x = factor(HeartDisease), fill = ExerciseAngina)) +
+  geom_bar(stat = "count") +
+  labs(title = "ExerciseAngina Distribution by HeartDisease", x = "Heart Disease", y = "Count") +
+  scale_fill_manual(values = c("tomato", "lightblue"))  
+```
+```{r}
+ggplot(df, aes(x = factor(HeartDisease), fill = ST_Slope)) +
+  geom_bar(stat = "count") +
+  labs(title = "ST_Slope Distribution by HeartDisease", x = "Heart Disease", y = "Count") +
+  scale_fill_manual(values = c("tomato", "lightblue", "green"))  
+```
+Flat and Up ST_Slope could be indicators of having or not heart disease.
+
+## Decision Trees
+
+Starting with decision trees, we apply the following procedure:
+
+1. Use recursive binary splitting to grow a large tree on the training data, stopping only when each terminal node has fewer than some minimum number of observations.
+2. Apply cost complexity pruning to the large tree in order to obtain a sequence of best subtrees, as a function of alpha.
+3. Use K-fold cross-validation to choose alpha. That is, divide the training observations into K folds. For each k =1,...,K:
+  (a) Repeat Steps 1 and 2 on all but the kth fold of the training data.
+  (b) Evaluate the mean squared prediction error on the data in the left-out kth fold, as a function of alpha. Average the results for each value of alpha, and pick alpha to minimize the average error.
+4. Return the subtree from Step 2 that corresponds to the chosen value of alpha.
+
+```{r}
+set.seed(123)
+trainIndex <- createDataPartition(df$HeartDisease, p = 0.8, list = FALSE)
+train_data <- df[trainIndex,]
+test_data <- df[-trainIndex,]
+
+tree_model <- rpart(HeartDisease ~ ., data = train_data, method = "class")
+
+cp_values <- tree_model$cptable[,"CP"]  
+
+k <- 10  
+set.seed(123)
+folds <- createFolds(train_data$HeartDisease, k = k)
+
+cv_results <- sapply(cp_values, function(cp) {
+  fold_metrics <- sapply(folds, function(fold_indices) {
+    validation_data <- train_data[fold_indices,]
+    training_data <- train_data[-fold_indices,]
+    
+    pruned_tree <- prune(tree_model, cp = cp)
+    
+    val_pred <- predict(pruned_tree, validation_data, type = "class")
+    
+    mean(val_pred == validation_data$HeartDisease)
+  })
+  
+  mean(fold_metrics)
+})
+
+best_cp <- cp_values[which.max(cv_results)]
+cat("Best cp:", best_cp, "\n")
+
+final_model <- prune(tree_model, cp = best_cp)
+testPred <- predict(final_model, newdata = test_data, type = "class")
+testPred <- factor(testPred, levels = levels(test_data$HeartDisease))
+test_data$HeartDisease <- factor(test_data$HeartDisease, levels = c("0", "1"))
+testPred <- predict(tree_model, newdata = test_data, type = "class")
+str(testPred)  
+confMatrix <- confusionMatrix(testPred, test_data$HeartDisease)
+print(confMatrix)
+```
+```{r}
+rpart.plot(
+  tree_model,           
+  type = 2,           
+  extra = 104,        
+  under = TRUE,         
+  fallen.leaves = TRUE, 
+  cex = 0.7,           
+  box.palette = "RdYlGn", 
+  shadow.col = "gray", 
+  main = "Decision Tree"
+)
+```
+
+## Decision Tree analysis
+
+**Key Metrics**
+
+- Accuracy: 85.25% of predictions were correct overall.
+- Kappa Statistic: 0.7018 of agreement between predictions and true labels while accounting for chance.
+- Sensitivity (Recall for Class 0): 80.00% were correctly identified as actual negatives.
+- Specificity (Recall for Class 1): 89.80% were correctly identified as actual positives.
+- Positive Predictive Value (Precision for Class 0): 87.18% Of the predictions labeled as 0 were correct.
+- Negative Predictive Value (Precision for Class 1): 83.81% of the predictions labeled as 1 were correct.
+- Balanced Accuracy: 84.90% as average of sensitivity and specificity.
+
+Overall, the accuracy of 85.25% and balanced accuracy of 84.90% indicate that the model performs well on both classes without significant bias. The relatively high specificity (89.80%) suggests the model effectively identifies individuals with heart disease. As for error distribution, the proportion of false positives and false negatives is not significantly different, suggesting balanced error distribution which is indicated by the p-value of 0.2482 (McNemar Test).
+
+**Key Splits and Factors**
+
+- ST_Slope: The first split is based on whether ST_Slope is "Up." This suggests that the slope of the ST segment during stress tests is the most critical factor in distinguishing between individuals with and without heart disease. If ST_Slope = Up, the probability of having heart disease is lower.
+- ChestPainType: After ST_Slope, ChestPainType is the next most important factor. ATA and NAP are associated with a lower risk of heart disease in certain branches. 
+- Oldpeak: In one branch, Oldpeak < 0.45 is used to refine predictions. Lower Oldpeak values suggest a reduced likelihood of heart disease.
+- Sex: In the "non-Up" branch of ST_Slope, gender (Sex = F) further distinguishes between those with and without heart disease which aligns with known medical knowledge but we keep in mind that the distribution of this dataset is not even between females and males.
+
+**Final Comments**
+The top predictors were found to be ST_Slope and ChestPainType in this model, consistent with their importance in stress test results and clinical presentations of heart disease. The decision tree also highlights interactions, such as how specific ChestPainType values and Oldpeak interact to influence predictions.
+
+## Bagging and Random Forest
+
+Since Random Forest is an extension of bagging where, in addition to bagging, a random subset of features is considered when splitting a node, we'll be combining these 2 techniques.
+
+```{r}
+set.seed(123)  
+train_index <- createDataPartition(y = df$HeartDisease, p = 0.8, list = FALSE)
+train_data <- df[train_index, ]
+test_data <- df[-train_index, ]
+
+bagging_model <- randomForest(HeartDisease ~ ., data = train_data, method = "class", ntree = 500)
+
+test_pred <- predict(bagging_model, newdata = test_data, type = "class")
+test_data$HeartDisease <- factor(test_data$HeartDisease, levels = c("0", "1"))
+test_pred <- predict(tree_model, newdata = test_data, type = "class")
+str(test_pred) 
+confusionMatrix(test_pred, test_data$HeartDisease)
+```
+```{r}
+plot(bagging_model)
+```
+##Random Forest analysis
+
+**Results Summary**
+
+- Accuracy: 85.25% (with a 95% confidence interval of (79.26%, 90.05%)).
+- Kappa: 0.7018 indicating a moderate agreement between predictions and actual values.
+- Sensitivity: 80% were correctly identified by the model as positive cases.
+- Specificity: 89.8% were correctly identified by the model as the negative cases.
+- Positive Predictive Value (PPV): 87.18% precision for the positive class.
+- Negative Predictive Value (NPV): 83.81% precision for the negative class.
+- Balanced Accuracy: 84.9% of average of sensitivity and specificity.
+- Mcnemar's Test p-value: 0.2482 suggesting that the model's false positives and false negatives are not significantly different.
+
+
+**Model Evaluation**
+
+The confusion matrix shows that the model predicts a significant number of positives and negatives correctly. The relatively high sensitivity and specificity indicate that the model is well-balanced, performing well at identifying both heart disease (positive class) and non-heart disease (negative class) cases. This result indicates good overall performance. Now, we'll be comparing it with Boosting to see if there's room for improvement.
+
+## Boosting
+
+```{r}
+boosting_model <- gbm(HeartDisease ~ ., 
+                      data = train_data, 
+                      distribution = "bernoulli", 
+                      n.trees = 500, 
+                      interaction.depth = 3, 
+                      shrinkage = 0.01, 
+                      cv.folds = 5, 
+                      verbose = FALSE)
+
+summary(boosting_model)
+```
+```{r}
+boosting_predictions <- predict(boosting_model, 
+                                newdata = test_data, 
+                                n.trees = boosting_model$n.trees, 
+                                type = "response")
+
+boosting_predictions_class <- ifelse(boosting_predictions > 0.5, "1", "0")
+boosting_predictions_class <- factor(boosting_predictions_class, levels = c("0", "1"))
+
+conf_matrix_boosting <- confusionMatrix(boosting_predictions_class, test_data$HeartDisease)
+print(conf_matrix_boosting)
+```
+## Boosting analysis
+
+**Results Summary**
+
+- True Positives: 92 (Class 1 predicted as 1)
+- True Negatives: 72 (Class 0 predicted as 0)
+- False Positives: 13 (Class 1 predicted as 0)
+- False Negatives: 6 (Class 0 predicted as 1)
+- Accuracy:89.62%
+- 95% Confidence Interval: (0.8426, 0.9363) shows that the true accuracy is likely between 84.26% and 93.63%.
+- Kappa: 0.7902 indicating a good agreement between the model's predictions and the actual labels.
+- Sensitivity: 0.8471 correctly identified as positive class.
+- Specificity: 0.9388 correctly identified as negative class. 
+- Balanced Accuracy: 0.8929 providing an overall balanced view of performance. 
+
+**Feature Importance**
+
+- Cholesterol: The most influential feature, with the highest relative importance (~30%).
+- MaxHR: Another important feature, contributing significantly to the model's decisions.
+- RestingECG: Has a noticeable influence but significantly lower than Cholesterol and MaxHR.
+
+**Final comments**
+
+The boosting model performs well with a high accuracy of 89.62% and good specificity and sensitivity, indicating it is effective at identifying both classes. Feature importance reveals that Cholesterol, MaxHR, and RestingECG are crucial features in predicting heart disease, with Cholesterol being the most influential. This model is well-tuned for the dataset and shows promising results in predicting heart disease risk.
+
+## Part 2: Unsupervised learning using k-means, hierarchical clustering and PCA
+
+PCA helps in reducing high dimension and noise to capture the most important variance in the data. Therefore, starting with PCA simplifies both K-Means and Hierarchical Clustering. First, we extract numeric columns and convert the categorical ones to numeric, then scale the data and perfom PCA.
+
+```{r}
+df_numeric <- df[, sapply(df, is.numeric)]
+
+if ("Category" %in% colnames(df) && !is.numeric(df$Category)) {
+    df$Category <- as.numeric(as.factor(df$Category))
+}
+if ("Category" %in% colnames(df)) {
+    df_numeric$Category <- df$Category
+}
+
+df_scaled <- scale(df_numeric)
+
+pca_result <- prcomp(df_scaled, center = TRUE, scale. = TRUE)
+summary(pca_result)
+```
+## Plot of the explained variance & extraction of the first two principal components
+
+```{r}
+fviz_eig(pca_result)
+pca_data <- as.data.frame(pca_result$x[, 1:2])
+```
+**PCA Analysis**
+
+The first principal component PC1 explains about 31.8% of the variance, followed by PC2 with 18.2%. Together, PC1 and PC2 explain about 50.0% of the variance. From PC3 onward, each component contributes less to explaining the variance. Since we are looking for dimension reduction for clustering and not for accuracy, we only extract the first two principal components for K-means and Hierarchical clustering.
+
+
+To perform K-means, we start with the elbow method to find the optimal number of clusters which shows 3 to be the best number of clusters.
+
+```{r}
+fviz_nbclust(pca_data, kmeans, method = "wss")  
+
+set.seed(42)  
+kmeans_result <- kmeans(pca_data, centers = 3, nstart = 25)
+
+pca_data$Cluster <- as.factor(kmeans_result$cluster)
+```
+## Plot to visualize clusters
+
+```{r}
+ggplot(pca_data, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(size = 3) +
+  labs(title = "K-Means Clustering (PCA)", x = "PC1", y = "PC2")
+```
+**K-means Analysis**
+
+From the PCA data, we can see that the clusters are relatively well-separated along the two principal components PC1 and PC2, suggesting that the features used in the PCA are sufficiently distinct to create these three groups. 
+
+
+Our next step consists of looking at the distribution of the heart disease variable within each cluster to evaluate whether a particular cluster tends to have more people with heart disease, while another has more people without it. we can do this through a contingency table:
+
+```{r}
+df$Cluster <- kmeans_result$cluster
+table(df$Cluster, df$HeartDisease)
+```
+The rows correspond to the clusters while the columns correspond to whether the member of the cluster has heart disease or not. The results show that clusters 1 and 2 seem to have a majority of people with heart disease while cluster 3 has a majority of people without heart disease. Cluster 3 is relatively pure as most individuals in it (343 out of 396) do not have heart disease, while clusters 1 and 2 have a mix with a majority towards class "1". Therefore, we can label cluster 3 as "healthy patients". As for clusters 1 and 2, further analysis is needed to explore the characteristics of each cluster and understand better their trends.
+
+Finally, we proceed with hierarchical clustering by computing the distance matrix and plotting the dendrogram:
+
+```{r}
+dist_matrix <- dist(pca_data[, 1:2])
+
+hc <- hclust(dist_matrix, method = "ward.D2")
+
+plot(hc, labels = FALSE, main = "Hierarchical Clustering Dendrogram")
+```
+
+**Visualization of hierarchical clustering results with 4 clusters**
+
+```{r}
+cl4 <- cutree(hc, k = 4) 
+pca_data$HC_Cluster <- as.factor(cl4)
+
+ggplot(pca_data, aes(x = PC1, y = PC2, color = HC_Cluster)) +
+  geom_point(size = 3) +
+  labs(title = "Hierarchical Clustering (PCA)", x = "PC1", y = "PC2")
+```
+**Visualization of hierarchical clustering results with 3 clusters**
+
+```{r}
+cl3 <- cutree(hc, k = 3) 
+pca_data$HC_Cluster <- as.factor(cl3)
+
+ggplot(pca_data, aes(x = PC1, y = PC2, color = HC_Cluster)) +
+  geom_point(size = 3) +
+  labs(title = "Hierarchical Clustering (PCA)", x = "PC1", y = "PC2")
+```
+**Visualization of hierarchical clustering results with 2 clusters**
+
+```{r}
+cl2 <- cutree(hc, k = 2) 
+pca_data$HC_Cluster <- as.factor(cl2)
+
+ggplot(pca_data, aes(x = PC1, y = PC2, color = HC_Cluster)) +
+  geom_point(size = 3) +
+  labs(title = "Hierarchical Clustering (PCA)", x = "PC1", y = "PC2")
+```
+Since all clusters seem to group similar data naturally, let's compare their silhouette scores:
+
+```{r}
+sil2 <- silhouette(cl2, dist(df_scaled))
+sil3 <- silhouette(cl3, dist(df_scaled))
+sil4 <- silhouette(cl4, dist(df_scaled))
+
+mean(sil2[, 3])  
+mean(sil3[, 3])  
+mean(sil4[, 3]) 
+```
+The silhouette scores suggest that clusters 2 and 3 may be the best fits. However, these scores are still low knowing that a good silhouette score is 1. This could be due to the nature of our dataset that has complex relationships or overlapping clusters, making it difficult to separate clearly. K-means and hierarchical clustering assume that clusters are spherical. Therefore, these algorithms may not perform well for more complex shapes. Possible solutions include feature selection and change of distance metric.
+
+## Conclusion
+
+To sum up, this project explored both supervised and unsupervised machine learning techniques to predict and analyze heart disease risk.
+
+**Supervised Learning:**
+The decision tree (DT), random forest (RF), and boosting models were evaluated for their ability to predict heart disease. Among these, boosting emerged as the most accurate model, achieving an accuracy of 89.62% and a balanced accuracy of 89.29%, with Cholesterol, MaxHR, and RestingECG identified as the most critical features. Random Forest and Decision Tree models performed similarly, with accuracies of 85.25%. The random forest, however, demonstrated higher robustness through its ensemble approach.
+The DT model offered interpretability by highlighting key factors such as ST_Slope and ChestPainType, which align with established medical knowledge, validating the models’ clinical relevance. Finally, the McNemar's Test confirmed that all supervised models maintained a balanced error distribution, and their high kappa statistics indicated good agreement between predictions and actual labels.
+
+**Unsupervised Learning:**
+Unsupervised techniques such as PCA, k-means, and hierarchical clustering provided valuable insights into the data structure: PCA revealed that the first two components explained 50% of the variance, enabling dimensionality reduction for clustering tasks while K-means clustering suggested three natural groupings in the data, with one cluster predominantly representing healthy patients and two clusters reflecting a mix of individuals with heart disease. Finally, hierarchical clustering supported the findings from k-means but exhibited challenges in achieving high silhouette scores, highlighting potential overlaps and complex relationships in the data.
+
+
+**Future Directions:**
+While the models demonstrated strong performance, future improvements could focus on exploring advanced clustering methods, such as DBSCAN or Gaussian Mixture Models, to address non-spherical data distributions and applying feature engineering techniques to enhance model interpretability and performance.
